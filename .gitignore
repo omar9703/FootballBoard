@@ -1,0 +1,22 @@
+# Generated Unreal Engine files
+/Binaries/
+/DerivedDataCache/
+/Intermediate/
+/Saved/
+
+# Generated IDE files
+/.vs/
+/*.sln
+/*.slnx
+*.suo
+*.user
+*.VC.db
+*.VC.opendb
+
+# Local assistant settings
+/.claude/
+
+# Local credentials
+.env
+.env.*
+!.env.example
