@@ -19,6 +19,14 @@ class FOOTBALLBOARD_API ABoardManager : public AActor
 	GENERATED_BODY()
 
 public:
+	// Screen distances are measured at a reference viewport height of 1080 pixels.
+	UPROPERTY(EditAnywhere, Category = "Touch", meta = (ClampMin = "0.0"))
+	float TouchPickPadding = 24.0f;
+	UPROPERTY(EditAnywhere, Category = "Touch", meta = (ClampMin = "0.0", ClampMax = "0.5"))
+	float TouchReleaseGraceSeconds = 0.15f;
+	UPROPERTY(EditAnywhere, Category = "Touch", meta = (ClampMin = "0.0"))
+	float TouchResumeDistance = 80.0f;
+
 	ABoardManager();
 
 	virtual void BeginPlay() override;
@@ -92,9 +100,10 @@ private:
 	UPROPERTY() APlayerPiece* DraggedPlayer = nullptr;
 	FVector DragOffset;
 	bool bWasPointerDownLastFrame = false;
+	bool bDragUsesTouch = false;
+	double LastPointerTime = 0.0;
+	FVector2D LastPointerScreen = FVector2D::ZeroVector;
 	void HandleDragInput();
-	bool GetPointer(APlayerController* PC,
-		bool& bDown, FHitResult& Hit) const;
 
 	// ----- Envio con throttling -----
 	float SendAccumulator = 0.0f;

@@ -5,6 +5,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Engine/SkeletalMesh.h"
 #include "Animation/AnimationAsset.h"
 #include "Engine/World.h"
@@ -236,87 +237,105 @@ FVector ABoardManager::ResolveCollisions(
 	return Result;
 }
 
-// Devuelve el puntero activo (touch primero, luego
-// raton) y su raycast contra la cancha.
-bool ABoardManager::GetPointer(APlayerController* PC,
-	bool& bDown, FHitResult& Hit) const
-{
-	bDown = false;
-	if (!PC) return false;
-
-	// 1) Touch
-	float TX, TY; bool bPressed = false;
-	PC->GetInputTouchState(
-		ETouchIndex::Touch1, TX, TY, bPressed);
-	if (bPressed)
-	{
-		bDown = true;
-		return PC->GetHitResultUnderFinger(
-			ETouchIndex::Touch1,
-			ECC_Visibility, false, Hit);
-	}
-
-	// 2) Raton (para pruebas en escritorio)
-	if (PC->IsInputKeyDown(EKeys::LeftMouseButton))
-	{
-		bDown = true;
-		return PC->GetHitResultUnderCursor(
-			ECC_Visibility, false, Hit);
-	}
-	return false;
-}
-
 void ABoardManager::HandleDragInput()
 {
-	APlayerController* PC =
-		UGameplayStatics::GetPlayerController(this, 0);
+	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
 	if (!PC) return;
 
-	bool bDown = false;
-	FHitResult Hit;
-	bool bValid = GetPointer(PC, bDown, Hit);
+	float X = 0.0f, Y = 0.0f;
+	bool bTouchDown = false;
+	PC->GetInputTouchState(ETouchIndex::Touch1, X, Y, bTouchDown);
+	bool bDown = bTouchDown;
+	// A touch drag must never switch to a synthetic mouse event during a dropout.
+	if (!bTouchDown && !(DraggedPlayer && bDragUsesTouch))
+	{
+		bDown = PC->IsInputKeyDown(EKeys::LeftMouseButton)
+			&& PC->GetMousePosition(X, Y);
+	}
 
-	bool bJustPressed =
-		bDown && !bWasPointerDownLastFrame;
+	const double Now = GetWorld()->GetTimeSeconds();
+	const bool bJustPressed = bDown && !bWasPointerDownLastFrame;
 	bWasPointerDownLastFrame = bDown;
-
 	if (!bDown)
 	{
+		// Freeze in place through brief hardware contact losses.
+		if (DraggedPlayer && bDragUsesTouch && Now - LastPointerTime <= TouchReleaseGraceSeconds)
+			return;
 		DraggedPlayer = nullptr;
 		return;
 	}
 
-	// Al iniciar el toque: seleccionar disco bajo el dedo
-	if (bJustPressed && !DraggedPlayer && bValid)
+	int32 ViewWidth = 0, ViewHeight = 0;
+	PC->GetViewportSize(ViewWidth, ViewHeight);
+	const float ScreenScale = FMath::Max(1.0f, float(ViewHeight)) / 1080.0f;
+	const FVector2D Screen(X, Y);
+	if (DraggedPlayer && bDragUsesTouch && bJustPressed)
 	{
-		APlayerPiece* Hp =
-			Cast<APlayerPiece>(Hit.GetActor());
-		if (Hp)
+		// A new distant touch is a new gesture, not a continuation of the old one.
+		if (Now - LastPointerTime > TouchReleaseGraceSeconds
+			|| FVector2D::Distance(Screen, LastPointerScreen) > TouchResumeDistance * ScreenScale)
+			DraggedPlayer = nullptr;
+	}
+
+	FVector RayOrigin, RayDirection;
+	if (!PC->DeprojectScreenPositionToWorld(X, Y, RayOrigin, RayDirection)
+		|| FMath::Abs(RayDirection.Z) < KINDA_SMALL_NUMBER)
+		return;
+	const float RayDistance = (PieceZForRole() - RayOrigin.Z) / RayDirection.Z;
+	if (RayDistance < 0.0f) return;
+	// Intersect a fixed plane: other discs cannot disturb the drag position.
+	const FVector PointerWorld = RayOrigin + RayDirection * RayDistance;
+
+	if (bJustPressed && !DraggedPlayer)
+	{
+		APlayerPiece* Selected = nullptr;
+		FHitResult Hit;
+		if (PC->GetHitResultAtScreenPosition(Screen, ECC_Visibility, false, Hit))
+			Selected = Cast<APlayerPiece>(Hit.GetActor());
+		if (!Selected && bTouchDown)
 		{
-			DraggedPlayer = Hp;
-			DragOffset = Hp->GetActorLocation()
-				- Hit.ImpactPoint;
+			float BestDistance = TNumericLimits<float>::Max();
+			for (APlayerPiece* Piece : Players)
+			{
+				if (!Piece) continue;
+				FVector2D Center, Edge;
+				const FVector Location = Piece->GetActorLocation();
+				if (!PC->ProjectWorldLocationToScreen(Location, Center)
+					|| !PC->ProjectWorldLocationToScreen(Location + PC->PlayerCameraManager->GetCameraRotation().RotateVector(FVector(0, Piece->CollisionRadius, 0)), Edge))
+					continue;
+				const float Distance = FVector2D::Distance(Screen, Center);
+				const float Radius = FVector2D::Distance(Center, Edge) + TouchPickPadding * ScreenScale;
+				if (Distance <= Radius && Distance < BestDistance)
+				{
+					BestDistance = Distance;
+					Selected = Piece;
+				}
+			}
+		}
+		if (Selected)
+		{
+			DraggedPlayer = Selected;
+			bDragUsesTouch = bTouchDown;
+			DragOffset = Selected->GetActorLocation() - PointerWorld;
 			DragOffset.Z = 0.0f;
 		}
 	}
 
-	// Mientras se mantiene: mover al punto del cesped
-	if (DraggedPlayer && bValid)
+	LastPointerTime = Now;
+	LastPointerScreen = Screen;
+	if (DraggedPlayer)
 	{
-		FVector Desired = Hit.ImpactPoint + DragOffset;
+		FVector Desired = PointerWorld + DragOffset;
 		Desired.Z = PieceZForRole();
 		Desired = ClampToField(Desired);
 		Desired = ResolveCollisions(DraggedPlayer, Desired);
 		Desired = ClampToField(Desired);
-
 		DraggedPlayer->SetActorLocation(Desired);
-
 		bPendingSend = true;
 		PendingSendID = DraggedPlayer->PlayerID;
 		PendingSendPos = Desired;
 	}
 }
-
 void ABoardManager::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
